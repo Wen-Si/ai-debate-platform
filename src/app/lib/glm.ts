@@ -14,10 +14,12 @@ export interface DebateRound {
   conContent: string;
 }
 
-export async function callGLM(
+// 流式调用GLM API，通过回调逐字返回内容
+export async function callGLMStream(
   messages: GLMMessage[],
+  onChunk: (chunk: string) => void,
   temperature: number = 0.9
-): Promise<string> {
+): Promise<void> {
   const response = await fetch(API_URL, {
     method: "POST",
     headers: {
@@ -29,6 +31,7 @@ export async function callGLM(
       messages,
       temperature,
       max_tokens: 2048,
+      stream: true,
     }),
   });
 
@@ -37,8 +40,58 @@ export async function callGLM(
     throw new Error(`GLM API error: ${error}`);
   }
 
-  const data = await response.json();
-  return data.choices[0].message.content;
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("无法读取响应流");
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (data === "[DONE]") continue;
+
+      try {
+        const parsed = JSON.parse(data);
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (delta) {
+          onChunk(delta);
+        }
+      } catch {
+        // 忽略解析失败的行
+      }
+    }
+  }
+
+  // 处理剩余缓冲区
+  if (buffer.trim()) {
+    const trimmed = buffer.trim();
+    if (trimmed.startsWith("data:")) {
+      const data = trimmed.slice(5).trim();
+      if (data !== "[DONE]") {
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            onChunk(delta);
+          }
+        } catch {
+          // 忽略
+        }
+      }
+    }
+  }
 }
 
 export function buildDebatePrompt(
@@ -82,13 +135,18 @@ export function buildDebatePrompt(
   return messages;
 }
 
-// 客户端直接调用GLM API生成完整辩论
-export async function generateDebate(topic: string): Promise<DebateRound[]> {
+// 流式生成辩论，每轮正方反方依次输出
+export async function generateDebateStream(
+  topic: string,
+  onProUpdate: (round: number, content: string) => void,
+  onConUpdate: (round: number, content: string) => void,
+  onRoundComplete: (round: number) => void
+): Promise<DebateRound[]> {
   const rounds: DebateRound[] = [];
   const previousArguments: string[] = [];
 
   for (let round = 1; round <= 3; round++) {
-    // 正方发言
+    // 正方发言 - 流式
     const proMessages = buildDebatePrompt(
       topic,
       "pro",
@@ -96,11 +154,15 @@ export async function generateDebate(topic: string): Promise<DebateRound[]> {
       round,
       previousArguments
     );
-    const proContent = await callGLM(proMessages, 0.95);
+    let proContent = "";
+    await callGLMStream(proMessages, (chunk) => {
+      proContent += chunk;
+      onProUpdate(round, proContent);
+    }, 0.95);
 
     previousArguments.push(`正方${["一辩", "二辩", "三辩"][round - 1]}：${proContent}`);
 
-    // 反方发言
+    // 反方发言 - 流式
     const conMessages = buildDebatePrompt(
       topic,
       "con",
@@ -108,7 +170,11 @@ export async function generateDebate(topic: string): Promise<DebateRound[]> {
       round,
       previousArguments
     );
-    const conContent = await callGLM(conMessages, 0.95);
+    let conContent = "";
+    await callGLMStream(conMessages, (chunk) => {
+      conContent += chunk;
+      onConUpdate(round, conContent);
+    }, 0.95);
 
     previousArguments.push(`反方${["一辩", "二辩", "三辩"][round - 1]}：${conContent}`);
 
@@ -119,6 +185,8 @@ export async function generateDebate(topic: string): Promise<DebateRound[]> {
       proContent,
       conContent,
     });
+
+    onRoundComplete(round);
   }
 
   return rounds;

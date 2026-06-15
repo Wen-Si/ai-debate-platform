@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2 } from "lucide-react";
-import { generateDebate, DebateRound } from "@/app/lib/glm";
+import { generateDebateStream, DebateRound } from "@/app/lib/glm";
 import {
   saveDebateRecord,
   getDebateHistory,
@@ -18,6 +18,14 @@ interface DebateArenaProps {
   date: string;
 }
 
+// 流式内容状态
+interface StreamingContent {
+  [round: number]: {
+    pro: string;
+    con: string;
+  };
+}
+
 export default function DebateArena({ topic, topicId, category, date }: DebateArenaProps) {
   const [rounds, setRounds] = useState<DebateRound[]>([]);
   const [currentRound, setCurrentRound] = useState(0);
@@ -25,6 +33,8 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
   const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState("");
   const [history, setHistory] = useState<DebateRecord[]>([]);
+  const [streaming, setStreaming] = useState<StreamingContent>({});
+  const [activeSpeaker, setActiveSpeaker] = useState<"pro" | "con" | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -35,7 +45,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [rounds, currentRound]);
+  }, [streaming, currentRound]);
 
   const startDebate = async () => {
     setIsLoading(true);
@@ -43,19 +53,38 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setRounds([]);
     setCurrentRound(0);
     setIsComplete(false);
+    setStreaming({});
 
     try {
-      // 客户端直接调用GLM API
-      const data = await generateDebate(topic);
-      setRounds(data);
+      const finalRounds = await generateDebateStream(
+        topic,
+        // 正方更新回调
+        (round, content) => {
+          setActiveSpeaker("pro");
+          setStreaming((prev) => ({
+            ...prev,
+            [round]: { ...prev[round], pro: content },
+          }));
+          setCurrentRound(round);
+        },
+        // 反方更新回调
+        (round, content) => {
+          setActiveSpeaker("con");
+          setStreaming((prev) => ({
+            ...prev,
+            [round]: { ...prev[round], con: content },
+          }));
+          setCurrentRound(round);
+        },
+        // 轮次完成回调
+        (round) => {
+          setActiveSpeaker(null);
+        }
+      );
 
-      // 逐轮展示动画效果
-      for (let i = 0; i < data.length; i++) {
-        setCurrentRound(i + 1);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-
+      setRounds(finalRounds);
       setIsComplete(true);
+      setActiveSpeaker(null);
 
       // 保存到Local Storage
       const record: DebateRecord = {
@@ -63,7 +92,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
         topic,
         category,
         date,
-        rounds: data,
+        rounds: finalRounds,
         createdAt: Date.now(),
       };
       saveDebateRecord(record);
@@ -73,6 +102,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
       setError("辩论生成失败，请稍后重试");
     } finally {
       setIsLoading(false);
+      setActiveSpeaker(null);
     }
   };
 
@@ -81,6 +111,8 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setCurrentRound(record.rounds.length);
     setIsComplete(true);
     setError("");
+    setStreaming({});
+    setActiveSpeaker(null);
   };
 
   const handleDeleteHistory = (id: string, e: React.MouseEvent) => {
@@ -97,9 +129,28 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setCurrentRound(0);
     setIsComplete(false);
     setError("");
+    setStreaming({});
+    setActiveSpeaker(null);
   };
 
   const positionNames = ["一辩", "二辩", "三辩"];
+
+  // 获取某轮某方的显示内容（流式或最终结果）
+  const getDisplayContent = (round: number, side: "pro" | "con") => {
+    if (streaming[round]?.[side]) {
+      return streaming[round][side];
+    }
+    const roundData = rounds.find((r) => r.round === round);
+    if (roundData) {
+      return side === "pro" ? roundData.proContent : roundData.conContent;
+    }
+    return "";
+  };
+
+  // 判断某轮某方是否正在流式输出
+  const isStreaming = (round: number, side: "pro" | "con") => {
+    return activeSpeaker === side && currentRound === round && isLoading;
+  };
 
   return (
     <div className="w-full max-w-5xl mx-auto">
@@ -140,7 +191,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
 
       {/* 控制按钮 */}
       <div className="flex justify-center gap-4 mb-8">
-        {!isLoading && rounds.length === 0 && (
+        {!isLoading && rounds.length === 0 && Object.keys(streaming).length === 0 && (
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -165,8 +216,8 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
         )}
       </div>
 
-      {/* 加载状态 */}
-      {isLoading && rounds.length === 0 && (
+      {/* 加载状态 - 初始 */}
+      {isLoading && Object.keys(streaming).length === 0 && (
         <div className="flex flex-col items-center justify-center py-20">
           <motion.div
             animate={{ rotate: 360 }}
@@ -188,11 +239,15 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
       {/* 辩论内容 */}
       <div ref={scrollRef} className="space-y-6 max-h-[70vh] overflow-y-auto scrollbar-hide pb-8">
         <AnimatePresence>
-          {rounds.map((round, index) => {
-            if (index >= currentRound) return null;
+          {[1, 2, 3].map((roundNum) => {
+            const proContent = getDisplayContent(roundNum, "pro");
+            const conContent = getDisplayContent(roundNum, "con");
+            const hasContent = proContent || conContent;
+            if (!hasContent) return null;
+
             return (
               <motion.div
-                key={round.round}
+                key={roundNum}
                 initial={{ opacity: 0, y: 30 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5 }}
@@ -202,87 +257,98 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                 <div className="flex items-center justify-center gap-3">
                   <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-600 to-transparent" />
                   <span className="text-amber-400 font-bold text-sm tracking-wider">
-                    第{round.round}轮交锋
+                    第{roundNum}轮交锋
                   </span>
                   <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-600 to-transparent" />
                 </div>
 
                 {/* 正方发言 */}
-                <motion.div
-                  initial={{ opacity: 0, x: -50 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.2, duration: 0.5 }}
-                  className="flex gap-4"
-                >
-                  <div className="flex-shrink-0">
-                    <div className="w-12 h-12 rounded-full bg-gradient-to-br from-red-500 to-red-700 flex items-center justify-center animate-pulse-glow">
-                      <User className="w-6 h-6 text-white" />
+                {proContent && (
+                  <motion.div
+                    initial={{ opacity: 0, x: -50 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.2, duration: 0.5 }}
+                    className="flex gap-4"
+                  >
+                    <div className="flex-shrink-0">
+                      <div className={`w-12 h-12 rounded-full bg-gradient-to-br from-red-500 to-red-700 flex items-center justify-center ${
+                        isStreaming(roundNum, "pro") ? "animate-pulse-glow" : ""
+                      }`}>
+                        <User className="w-6 h-6 text-white" />
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="text-red-400 font-bold text-sm">
-                        正方{positionNames[round.proPosition - 1]}
-                      </span>
-                      <span className="px-2 py-0.5 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30">
-                        支持方
-                      </span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-red-400 font-bold text-sm">
+                          正方{positionNames[roundNum - 1]}
+                        </span>
+                        <span className="px-2 py-0.5 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-500/30">
+                          支持方
+                        </span>
+                        {isStreaming(roundNum, "pro") && (
+                          <span className="flex items-center gap-1 text-xs text-amber-400 animate-pulse">
+                            <Sparkles className="w-3 h-3" />
+                            思考中...
+                          </span>
+                        )}
+                      </div>
+                      <div className="bg-gradient-to-r from-red-950/50 to-transparent border-l-4 border-red-500 rounded-r-xl p-5">
+                        <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">
+                          {proContent}
+                          {isStreaming(roundNum, "pro") && (
+                            <span className="inline-block w-2 h-4 bg-amber-400 ml-1 animate-pulse" />
+                          )}
+                        </p>
+                      </div>
                     </div>
-                    <div className="bg-gradient-to-r from-red-950/50 to-transparent border-l-4 border-red-500 rounded-r-xl p-5">
-                      <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">
-                        {round.proContent}
-                      </p>
-                    </div>
-                  </div>
-                </motion.div>
+                  </motion.div>
+                )}
 
                 {/* 反方发言 */}
-                <motion.div
-                  initial={{ opacity: 0, x: 50 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.6, duration: 0.5 }}
-                  className="flex gap-4 flex-row-reverse"
-                >
-                  <div className="flex-shrink-0">
-                    <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center animate-pulse-glow-blue">
-                      <User className="w-6 h-6 text-white" />
+                {conContent && (
+                  <motion.div
+                    initial={{ opacity: 0, x: 50 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.6, duration: 0.5 }}
+                    className="flex gap-4 flex-row-reverse"
+                  >
+                    <div className="flex-shrink-0">
+                      <div className={`w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center ${
+                        isStreaming(roundNum, "con") ? "animate-pulse-glow-blue" : ""
+                      }`}>
+                        <User className="w-6 h-6 text-white" />
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2 justify-end">
-                      <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 text-xs rounded-full border border-blue-500/30">
-                        反对方
-                      </span>
-                      <span className="text-blue-400 font-bold text-sm">
-                        反方{positionNames[round.conPosition - 1]}
-                      </span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2 justify-end">
+                        {isStreaming(roundNum, "con") && (
+                          <span className="flex items-center gap-1 text-xs text-amber-400 animate-pulse">
+                            <Sparkles className="w-3 h-3" />
+                            思考中...
+                          </span>
+                        )}
+                        <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 text-xs rounded-full border border-blue-500/30">
+                          反对方
+                        </span>
+                        <span className="text-blue-400 font-bold text-sm">
+                          反方{positionNames[roundNum - 1]}
+                        </span>
+                      </div>
+                      <div className="bg-gradient-to-l from-blue-950/50 to-transparent border-r-4 border-blue-500 rounded-l-xl p-5">
+                        <p className="text-slate-200 leading-relaxed whitespace-pre-wrap text-right">
+                          {conContent}
+                          {isStreaming(roundNum, "con") && (
+                            <span className="inline-block w-2 h-4 bg-amber-400 ml-1 animate-pulse" />
+                          )}
+                        </p>
+                      </div>
                     </div>
-                    <div className="bg-gradient-to-l from-blue-950/50 to-transparent border-r-4 border-blue-500 rounded-l-xl p-5">
-                      <p className="text-slate-200 leading-relaxed whitespace-pre-wrap text-right">
-                        {round.conContent}
-                      </p>
-                    </div>
-                  </div>
-                </motion.div>
+                  </motion.div>
+                )}
               </motion.div>
             );
           })}
         </AnimatePresence>
-
-        {/* 正在加载下一轮 */}
-        {isLoading && currentRound > 0 && currentRound < 3 && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="flex justify-center py-4"
-          >
-            <div className="flex items-center gap-2 text-amber-400">
-              <Sparkles className="w-4 h-4 animate-pulse" />
-              <span className="text-sm">AI辩手正在激烈交锋中...</span>
-              <Sparkles className="w-4 h-4 animate-pulse" />
-            </div>
-          </motion.div>
-        )}
 
         {/* 辩论结束 */}
         {isComplete && (
