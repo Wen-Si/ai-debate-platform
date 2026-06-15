@@ -1,7 +1,12 @@
 self.__BUILD_MANIFEST = {
   "__rewrites": {
     "afterFiles": [],
-    "beforeFiles": [],
+    "beforeFiles": [
+      {
+        "source": "/ai-debate-platform//_next/:path+",
+        "destination": "/ai-debate-platform/_next/:path+"
+      }
+    ],
     "fallback": []
   },
   "sortedPages": [
