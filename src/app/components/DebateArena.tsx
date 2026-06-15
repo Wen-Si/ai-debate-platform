@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2 } from "lucide-react";
-import { DebateRound } from "@/app/api/debate/route";
+import { generateDebate, DebateRound } from "@/app/lib/glm";
 import {
   saveDebateRecord,
   getDebateHistory,
@@ -45,20 +45,12 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setIsComplete(false);
 
     try {
-      const response = await fetch("/api/debate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic }),
-      });
+      // 客户端直接调用GLM API
+      const data = await generateDebate(topic);
+      setRounds(data);
 
-      if (!response.ok) {
-        throw new Error("辩论生成失败");
-      }
-
-      const data = await response.json();
-      setRounds(data.rounds);
-
-      for (let i = 0; i < data.rounds.length; i++) {
+      // 逐轮展示动画效果
+      for (let i = 0; i < data.length; i++) {
         setCurrentRound(i + 1);
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
@@ -71,12 +63,13 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
         topic,
         category,
         date,
-        rounds: data.rounds,
+        rounds: data,
         createdAt: Date.now(),
       };
       saveDebateRecord(record);
       setHistory(getDebateHistory());
     } catch (err) {
+      console.error("Debate error:", err);
       setError("辩论生成失败，请稍后重试");
     } finally {
       setIsLoading(false);

@@ -6,6 +6,14 @@ export interface GLMMessage {
   content: string;
 }
 
+export interface DebateRound {
+  round: number;
+  proPosition: number;
+  conPosition: number;
+  proContent: string;
+  conContent: string;
+}
+
 export async function callGLM(
   messages: GLMMessage[],
   temperature: number = 0.9
@@ -72,4 +80,46 @@ export function buildDebatePrompt(
   }
 
   return messages;
+}
+
+// 客户端直接调用GLM API生成完整辩论
+export async function generateDebate(topic: string): Promise<DebateRound[]> {
+  const rounds: DebateRound[] = [];
+  const previousArguments: string[] = [];
+
+  for (let round = 1; round <= 3; round++) {
+    // 正方发言
+    const proMessages = buildDebatePrompt(
+      topic,
+      "pro",
+      round,
+      round,
+      previousArguments
+    );
+    const proContent = await callGLM(proMessages, 0.95);
+
+    previousArguments.push(`正方${["一辩", "二辩", "三辩"][round - 1]}：${proContent}`);
+
+    // 反方发言
+    const conMessages = buildDebatePrompt(
+      topic,
+      "con",
+      round,
+      round,
+      previousArguments
+    );
+    const conContent = await callGLM(conMessages, 0.95);
+
+    previousArguments.push(`反方${["一辩", "二辩", "三辩"][round - 1]}：${conContent}`);
+
+    rounds.push({
+      round,
+      proPosition: round,
+      conPosition: round,
+      proContent,
+      conContent,
+    });
+  }
+
+  return rounds;
 }
