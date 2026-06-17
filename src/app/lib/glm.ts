@@ -27,7 +27,7 @@ export async function callGLMStream(
       Authorization: `Bearer ${API_KEY}`,
     },
     body: JSON.stringify({
-      model: "glm-4.5-flash",
+      model: "glm-4-flash", // 更新模型名称
       messages,
       temperature,
       max_tokens: 2048,
@@ -136,11 +136,13 @@ export function buildDebatePrompt(
 }
 
 // 流式生成辩论，每轮正方反方依次输出
+// 使用打字机效果逐字显示
 export async function generateDebateStream(
   topic: string,
   onProUpdate: (round: number, content: string) => void,
   onConUpdate: (round: number, content: string) => void,
-  onRoundComplete: (round: number) => void
+  onRoundComplete: (round: number) => void,
+  typewriterDelay: number = 30 // 打字机延迟（毫秒）
 ): Promise<DebateRound[]> {
   const rounds: DebateRound[] = [];
   const previousArguments: string[] = [];
@@ -154,13 +156,26 @@ export async function generateDebateStream(
       round,
       previousArguments
     );
-    let proContent = "";
+    
+    // 收集完整内容
+    let proFullContent = "";
+    const proChunks: string[] = [];
+    
     await callGLMStream(proMessages, (chunk) => {
-      proContent += chunk;
-      onProUpdate(round, proContent);
+      proChunks.push(chunk);
     }, 0.95);
+    
+    // 合并所有chunk
+    proFullContent = proChunks.join("");
+    
+    // 打字机效果逐字显示
+    for (let i = 0; i < proFullContent.length; i++) {
+      const partialContent = proFullContent.slice(0, i + 1);
+      onProUpdate(round, partialContent);
+      await new Promise(resolve => setTimeout(resolve, typewriterDelay));
+    }
 
-    previousArguments.push(`正方${["一辩", "二辩", "三辩"][round - 1]}：${proContent}`);
+    previousArguments.push(`正方${["一辩", "二辩", "三辩"][round - 1]}：${proFullContent}`);
 
     // 反方发言 - 流式
     const conMessages = buildDebatePrompt(
@@ -170,20 +185,31 @@ export async function generateDebateStream(
       round,
       previousArguments
     );
-    let conContent = "";
+    
+    let conFullContent = "";
+    const conChunks: string[] = [];
+    
     await callGLMStream(conMessages, (chunk) => {
-      conContent += chunk;
-      onConUpdate(round, conContent);
+      conChunks.push(chunk);
     }, 0.95);
+    
+    conFullContent = conChunks.join("");
+    
+    // 打字机效果逐字显示
+    for (let i = 0; i < conFullContent.length; i++) {
+      const partialContent = conFullContent.slice(0, i + 1);
+      onConUpdate(round, partialContent);
+      await new Promise(resolve => setTimeout(resolve, typewriterDelay));
+    }
 
-    previousArguments.push(`反方${["一辩", "二辩", "三辩"][round - 1]}：${conContent}`);
+    previousArguments.push(`反方${["一辩", "二辩", "三辩"][round - 1]}：${conFullContent}`);
 
     rounds.push({
       round,
       proPosition: round,
       conPosition: round,
-      proContent,
-      conContent,
+      proContent: proFullContent,
+      conContent: conFullContent,
     });
 
     onRoundComplete(round);
