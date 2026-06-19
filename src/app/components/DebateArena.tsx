@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2, Volume2, VolumeX } from "lucide-react";
+import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2, Volume2 } from "lucide-react";
 import { generateDebateStream, DebateRound } from "@/app/lib/glm";
 import {
   saveDebateRecord,
@@ -13,8 +13,9 @@ import {
 import {
   loadVoices,
   getVoiceConfig,
-  speak,
+  speakNow,
   stopSpeaking,
+  unlockAudio,
 } from "@/app/lib/tts";
 import VoiceControls from "./VoiceControls";
 
@@ -43,7 +44,17 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
   const [activeSpeaker, setActiveSpeaker] = useState<"pro" | "con" | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [voiceRate, setVoiceRate] = useState(1.0);
+  const ttsEnabledRef = useRef(ttsEnabled);
+  const voiceRateRef = useRef(voiceRate);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    ttsEnabledRef.current = ttsEnabled;
+  }, [ttsEnabled]);
+
+  useEffect(() => {
+    voiceRateRef.current = voiceRate;
+  }, [voiceRate]);
 
   useEffect(() => {
     setHistory(getDebateHistory());
@@ -57,14 +68,21 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     }
   }, [streaming, currentRound]);
 
-  // 启动TTS
-  const startTTS = async (text: string, side: "pro" | "con", position: 1 | 2 | 3) => {
-    if (!ttsEnabled) return;
+  // 播放单条发言（用户主动点击）
+  const playSingleSpeech = (text: string, side: "pro" | "con", position: 1 | 2 | 3) => {
+    if (!ttsEnabledRef.current) {
+      alert('请先点击"语音播报"按钮开启功能');
+      return;
+    }
+    if (!text) return;
+    unlockAudio();
     const config = getVoiceConfig(side, position);
-    config.rate = voiceRate;
-    await speak(text, config);
+    config.rate = voiceRateRef.current;
+    stopSpeaking();
+    speakNow(text, config);
   };
 
+  // 播放完整辩论（按时间线）
   const startDebate = async () => {
     setIsLoading(true);
     setError("");
@@ -73,6 +91,14 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setIsComplete(false);
     setStreaming({});
     stopSpeaking();
+
+    // 如果开启了TTS，解锁音频
+    if (ttsEnabledRef.current) {
+      unlockAudio();
+    }
+
+    // 收集所有发言用于串行TTS播放
+    const ttsQueue: Array<{ text: string; side: "pro" | "con"; position: number }> = [];
 
     try {
       const finalRounds = await generateDebateStream(
@@ -99,13 +125,13 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
         (round) => {
           setActiveSpeaker(null);
         },
-        // 正方完成回调 - 触发TTS
+        // 正方完成回调 - 加入TTS队列
         (round, content) => {
-          startTTS(content, "pro", round as 1 | 2 | 3);
+          ttsQueue.push({ text: content, side: "pro", position: round });
         },
-        // 反方完成回调 - 触发TTS
+        // 反方完成回调 - 加入TTS队列
         (round, content) => {
-          startTTS(content, "con", round as 1 | 2 | 3);
+          ttsQueue.push({ text: content, side: "con", position: round });
         },
         30
       );
@@ -113,6 +139,20 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
       setRounds(finalRounds);
       setIsComplete(true);
       setActiveSpeaker(null);
+
+      // 辩论内容全部生成后，串行播放TTS
+      if (ttsEnabledRef.current && ttsQueue.length > 0) {
+        for (const item of ttsQueue) {
+          if (!ttsEnabledRef.current) break; // 用户中途关闭
+          await new Promise<void>((resolve) => {
+            const config = getVoiceConfig(item.side, item.position as 1 | 2 | 3);
+            config.rate = voiceRateRef.current;
+            speakNow(item.text, config, undefined, () => resolve());
+            // 兜底超时
+            setTimeout(() => resolve(), Math.max(10000, item.text.length * 200));
+          });
+        }
+      }
 
       // 保存到Local Storage
       const record: DebateRecord = {
@@ -161,13 +201,6 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setStreaming({});
     setActiveSpeaker(null);
     stopSpeaking();
-  };
-
-  // 单条发言的TTS播放
-  const playSingleSpeech = (text: string, side: "pro" | "con", position: 1 | 2 | 3) => {
-    if (!ttsEnabled) return;
-    stopSpeaking();
-    startTTS(text, side, position);
   };
 
   const positionNames = ["一辩", "二辩", "三辩"];
@@ -336,7 +369,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                         {ttsEnabled && !isStreaming(roundNum, "pro") && (
                           <button
                             onClick={() => playSingleSpeech(proContent, "pro", roundNum as 1 | 2 | 3)}
-                            className="ml-auto p-1 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
+                            className="ml-auto p-1.5 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
                             title="播放语音"
                           >
                             <Volume2 className="w-3.5 h-3.5" />
@@ -375,7 +408,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                         {ttsEnabled && !isStreaming(roundNum, "con") && (
                           <button
                             onClick={() => playSingleSpeech(conContent, "con", roundNum as 1 | 2 | 3)}
-                            className="ml-auto p-1 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
+                            className="ml-auto p-1.5 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
                             title="播放语音"
                           >
                             <Volume2 className="w-3.5 h-3.5" />

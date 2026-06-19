@@ -55,71 +55,69 @@ export function loadVoices(): Promise<SpeechSynthesisVoice[]> {
 function getChineseVoice(
   preferredGender: "female" | "male" | "any" = "any"
 ): SpeechSynthesisVoice | null {
-  const zhVoices = cachedVoices.filter((v) =>
-    v.lang.toLowerCase().startsWith("zh")
-  );
-
-  if (zhVoices.length === 0) {
-    // 兜底：使用默认语音
-    return cachedVoices[0] || null;
+  if (cachedVoices.length === 0) {
+    return null;
   }
 
+  // 查找中文语音（包括zh-CN, zh-TW, zh-HK等）
+  const zhVoices = cachedVoices.filter((v) => {
+    const lang = v.lang.toLowerCase();
+    return lang.startsWith("zh") || lang.includes("chinese");
+  });
+
+  // 如果没有中文语音，尝试使用任何可用的语音
+  const candidateVoices = zhVoices.length > 0 ? zhVoices : cachedVoices;
+
   if (preferredGender === "any") {
-    return zhVoices[0];
+    return candidateVoices[0] || null;
   }
 
   // 尝试按名称匹配性别（启发式）
-  const femaleKeywords = ["female", "woman", "女", "xiaoxiao", "yating", "tracy", "maria"];
-  const maleKeywords = ["male", "man", "男", "kangkang", "yunxi", "yunyang"];
+  const femaleKeywords = [
+    "female", "woman", "女", "xiaoxiao", "yating", "tracy", "maria",
+    "hui", "mei", "ling", "tingting", "siri", "google", "microsoft yaoyao"
+  ];
+  const maleKeywords = [
+    "male", "man", "男", "kangkang", "yunxi", "yunyang",
+    "haoxiang", "kai", "siri", "google", "microsoft yunxi"
+  ];
 
   const keywords = preferredGender === "female" ? femaleKeywords : maleKeywords;
 
-  const matched = zhVoices.find((v) =>
+  const matched = candidateVoices.find((v) =>
     keywords.some((k) => v.name.toLowerCase().includes(k))
   );
 
-  return matched || zhVoices[0];
+  return matched || candidateVoices[0] || null;
 }
 
 // 为每位辩手配置独特的声音风格
 export function getVoiceConfig(side: Side, position: Position): VoiceConfig {
-  // 正方：男声为主（激昂有力）
-  // 反方：女声为主（理性思辨）
-  // 位置影响音调和语速，形成差异
-
   let preferredGender: "female" | "male" | "any" = "any";
   let rate = 1.0;
   let pitch = 1.0;
 
   if (side === "pro") {
-    // 正方：男声，更激昂
     preferredGender = "male";
     if (position === 1) {
-      // 一辩：开篇立论，语速中等偏快，音调正常
       rate = 1.1;
       pitch = 1.0;
     } else if (position === 2) {
-      // 二辩：深入论述，语速稍快，音调略高
       rate = 1.15;
       pitch = 1.15;
     } else {
-      // 三辩：总结陈词，语速适中，音调较高以增强感染力
       rate = 1.05;
       pitch = 1.25;
     }
   } else {
-    // 反方：女声，理性
     preferredGender = "female";
     if (position === 1) {
-      // 一辩：开篇立论
       rate = 1.0;
       pitch = 1.1;
     } else if (position === 2) {
-      // 二辩：深入论述
       rate = 1.05;
       pitch = 1.25;
     } else {
-      // 三辩：总结陈词
       rate = 0.95;
       pitch = 1.35;
     }
@@ -135,20 +133,20 @@ export function getVoiceConfig(side: Side, position: Position): VoiceConfig {
   };
 }
 
-// 语音播报队列
-let speechQueue: Promise<void> = Promise.resolve();
-
-export function speak(
+// 立即播放语音（必须在用户交互事件中同步调用）
+export function speakNow(
   text: string,
   config: VoiceConfig,
   onStart?: () => void,
   onEnd?: () => void
-): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      resolve();
-      return;
-    }
+): void {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    return;
+  }
+
+  try {
+    // 取消之前未完成的语音
+    window.speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(text);
     if (config.voice) {
@@ -165,38 +163,113 @@ export function speak(
 
     utterance.onend = () => {
       onEnd?.();
-      resolve();
     };
 
-    utterance.onerror = () => {
+    utterance.onerror = (e) => {
+      console.warn("TTS error:", e);
+      onEnd?.();
+    };
+
+    // 立即调用，保留用户交互上下文
+    window.speechSynthesis.speak(utterance);
+  } catch (e) {
+    console.error("TTS speak error:", e);
+    onEnd?.();
+  }
+}
+
+// Promise版本的speak（保持向后兼容）
+export function speak(
+  text: string,
+  config: VoiceConfig,
+  onStart?: () => void,
+  onEnd?: () => void
+): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      resolve();
+      return;
+    }
+
+    try {
+      const utterance = new SpeechSynthesisUtterance(text);
+      if (config.voice) {
+        utterance.voice = config.voice;
+      }
+      utterance.lang = "zh-CN";
+      utterance.rate = config.rate;
+      utterance.pitch = config.pitch;
+      utterance.volume = config.volume;
+
+      utterance.onstart = () => {
+        onStart?.();
+      };
+
+      utterance.onend = () => {
+        onEnd?.();
+        resolve();
+      };
+
+      utterance.onerror = (e) => {
+        console.warn("TTS error:", e);
+        onEnd?.();
+        resolve();
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch (e) {
+      console.error("TTS speak error:", e);
       onEnd?.();
       resolve();
-    };
-
-    // 串行队列，避免语音重叠
-    speechQueue = speechQueue.then(() => {
-      window.speechSynthesis.speak(utterance);
-    });
+    }
   });
 }
 
 // 停止所有语音
 export function stopSpeaking(): void {
   if (typeof window !== "undefined" && "speechSynthesis" in window) {
-    window.speechSynthesis.cancel();
-    speechQueue = Promise.resolve();
+    try {
+      window.speechSynthesis.cancel();
+    } catch (e) {
+      console.warn("TTS stop error:", e);
+    }
   }
 }
 
-// 暂停/恢复
+// 暂停
 export function pauseSpeaking(): void {
   if (typeof window !== "undefined" && "speechSynthesis" in window) {
-    window.speechSynthesis.pause();
+    try {
+      window.speechSynthesis.pause();
+    } catch (e) {
+      console.warn("TTS pause error:", e);
+    }
   }
 }
 
+// 恢复
 export function resumeSpeaking(): void {
   if (typeof window !== "undefined" && "speechSynthesis" in window) {
-    window.speechSynthesis.resume();
+    try {
+      window.speechSynthesis.resume();
+    } catch (e) {
+      console.warn("TTS resume error:", e);
+    }
+  }
+}
+
+// 解锁音频（必须在用户交互事件中调用一次）
+export function unlockAudio(): void {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    return;
+  }
+  try {
+    // 播放一个空utterance来解锁音频
+    const u = new SpeechSynthesisUtterance("");
+    u.volume = 0;
+    u.lang = "zh-CN";
+    window.speechSynthesis.speak(u);
+  } catch (e) {
+    console.warn("TTS unlock error:", e);
   }
 }

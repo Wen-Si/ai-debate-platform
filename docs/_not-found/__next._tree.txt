@@ -1,2 +1,2 @@
-:HL["/ai-debate-platform/_next/static/chunks/27mu9kdghfxe4.css","style"]
-0:{"tree":{"name":"","param":null,"prefetchHints":16,"slots":{"children":{"name":"/_not-found","param":null,"prefetchHints":0,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":0,"slots":null}}}}},"staleTime":300,"buildId":"NfGZn2kAWKOVPS1kl0t0b"}
+:HL["/ai-debate-platform/_next/static/chunks/1z537rccsrnjv.css","style"]
+0:{"tree":{"name":"","param":null,"prefetchHints":16,"slots":{"children":{"name":"/_not-found","param":null,"prefetchHints":0,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":0,"slots":null}}}}},"staleTime":300,"buildId":"MSOCx9SL4DSGS5RIma2Im"}
