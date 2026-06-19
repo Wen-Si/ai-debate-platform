@@ -27,7 +27,7 @@ export async function callGLMStream(
       Authorization: `Bearer ${API_KEY}`,
     },
     body: JSON.stringify({
-      model: "glm-4-flash", // 更新模型名称
+      model: "glm-4-flash",
       messages,
       temperature,
       max_tokens: 2048,
@@ -142,7 +142,9 @@ export async function generateDebateStream(
   onProUpdate: (round: number, content: string) => void,
   onConUpdate: (round: number, content: string) => void,
   onRoundComplete: (round: number) => void,
-  typewriterDelay: number = 30 // 打字机延迟（毫秒）
+  onProComplete?: (round: number, content: string) => void,
+  onConComplete?: (round: number, content: string) => void,
+  typewriterDelay: number = 30
 ): Promise<DebateRound[]> {
   const rounds: DebateRound[] = [];
   const previousArguments: string[] = [];
@@ -156,18 +158,16 @@ export async function generateDebateStream(
       round,
       previousArguments
     );
-    
-    // 收集完整内容
+
     let proFullContent = "";
     const proChunks: string[] = [];
-    
+
     await callGLMStream(proMessages, (chunk) => {
       proChunks.push(chunk);
     }, 0.95);
-    
-    // 合并所有chunk
+
     proFullContent = proChunks.join("");
-    
+
     // 打字机效果逐字显示
     for (let i = 0; i < proFullContent.length; i++) {
       const partialContent = proFullContent.slice(0, i + 1);
@@ -177,6 +177,9 @@ export async function generateDebateStream(
 
     previousArguments.push(`正方${["一辩", "二辩", "三辩"][round - 1]}：${proFullContent}`);
 
+    // 触发正方TTS
+    onProComplete?.(round, proFullContent);
+
     // 反方发言 - 流式
     const conMessages = buildDebatePrompt(
       topic,
@@ -185,17 +188,16 @@ export async function generateDebateStream(
       round,
       previousArguments
     );
-    
+
     let conFullContent = "";
     const conChunks: string[] = [];
-    
+
     await callGLMStream(conMessages, (chunk) => {
       conChunks.push(chunk);
     }, 0.95);
-    
+
     conFullContent = conChunks.join("");
-    
-    // 打字机效果逐字显示
+
     for (let i = 0; i < conFullContent.length; i++) {
       const partialContent = conFullContent.slice(0, i + 1);
       onConUpdate(round, partialContent);
@@ -203,6 +205,9 @@ export async function generateDebateStream(
     }
 
     previousArguments.push(`反方${["一辩", "二辩", "三辩"][round - 1]}：${conFullContent}`);
+
+    // 触发反方TTS
+    onConComplete?.(round, conFullContent);
 
     rounds.push({
       round,

@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2 } from "lucide-react";
+import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2, Volume2, VolumeX } from "lucide-react";
 import { generateDebateStream, DebateRound } from "@/app/lib/glm";
 import {
   saveDebateRecord,
@@ -10,6 +10,13 @@ import {
   deleteDebateRecord,
   DebateRecord,
 } from "@/app/lib/storage";
+import {
+  loadVoices,
+  getVoiceConfig,
+  speak,
+  stopSpeaking,
+} from "@/app/lib/tts";
+import VoiceControls from "./VoiceControls";
 
 interface DebateArenaProps {
   topic: string;
@@ -18,7 +25,6 @@ interface DebateArenaProps {
   date: string;
 }
 
-// 流式内容状态
 interface StreamingContent {
   [round: number]: {
     pro: string;
@@ -35,10 +41,14 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
   const [history, setHistory] = useState<DebateRecord[]>([]);
   const [streaming, setStreaming] = useState<StreamingContent>({});
   const [activeSpeaker, setActiveSpeaker] = useState<"pro" | "con" | null>(null);
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [voiceRate, setVoiceRate] = useState(1.0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setHistory(getDebateHistory());
+    // 预加载语音
+    loadVoices();
   }, []);
 
   useEffect(() => {
@@ -47,6 +57,14 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     }
   }, [streaming, currentRound]);
 
+  // 启动TTS
+  const startTTS = async (text: string, side: "pro" | "con", position: 1 | 2 | 3) => {
+    if (!ttsEnabled) return;
+    const config = getVoiceConfig(side, position);
+    config.rate = voiceRate;
+    await speak(text, config);
+  };
+
   const startDebate = async () => {
     setIsLoading(true);
     setError("");
@@ -54,6 +72,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setCurrentRound(0);
     setIsComplete(false);
     setStreaming({});
+    stopSpeaking();
 
     try {
       const finalRounds = await generateDebateStream(
@@ -79,7 +98,16 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
         // 轮次完成回调
         (round) => {
           setActiveSpeaker(null);
-        }
+        },
+        // 正方完成回调 - 触发TTS
+        (round, content) => {
+          startTTS(content, "pro", round as 1 | 2 | 3);
+        },
+        // 反方完成回调 - 触发TTS
+        (round, content) => {
+          startTTS(content, "con", round as 1 | 2 | 3);
+        },
+        30
       );
 
       setRounds(finalRounds);
@@ -113,6 +141,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setError("");
     setStreaming({});
     setActiveSpeaker(null);
+    stopSpeaking();
   };
 
   const handleDeleteHistory = (id: string, e: React.MouseEvent) => {
@@ -131,11 +160,18 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setError("");
     setStreaming({});
     setActiveSpeaker(null);
+    stopSpeaking();
+  };
+
+  // 单条发言的TTS播放
+  const playSingleSpeech = (text: string, side: "pro" | "con", position: 1 | 2 | 3) => {
+    if (!ttsEnabled) return;
+    stopSpeaking();
+    startTTS(text, side, position);
   };
 
   const positionNames = ["一辩", "二辩", "三辩"];
 
-  // 获取某轮某方的显示内容（流式或最终结果）
   const getDisplayContent = (round: number, side: "pro" | "con") => {
     if (streaming[round]?.[side]) {
       return streaming[round][side];
@@ -147,25 +183,21 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     return "";
   };
 
-  // 判断某轮某方是否正在流式输出
   const isStreaming = (round: number, side: "pro" | "con") => {
     return activeSpeaker === side && currentRound === round && isLoading;
   };
 
   return (
     <div className="w-full max-w-5xl mx-auto">
-      {/* 历史记录侧边栏 */}
-      {history.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mb-6"
-        >
-          <div className="flex items-center gap-2 mb-3">
-            <Clock className="w-4 h-4 text-slate-400" />
-            <span className="text-sm font-medium text-slate-300">历史辩论</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
+      {/* 顶部工具栏 */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        {/* 历史记录侧边栏触发区 */}
+        {history.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-sm text-slate-400">
+              <Clock className="w-4 h-4" />
+              <span>历史辩论:</span>
+            </div>
             {history.map((record) => (
               <button
                 key={record.id}
@@ -186,8 +218,18 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
               </button>
             ))}
           </div>
-        </motion.div>
-      )}
+        )}
+
+        {/* TTS控制 - 靠右 */}
+        <div className="relative ml-auto">
+          <VoiceControls
+            ttsEnabled={ttsEnabled}
+            onTtsEnabledChange={setTtsEnabled}
+            voiceRate={voiceRate}
+            onVoiceRateChange={setVoiceRate}
+          />
+        </div>
+      </div>
 
       {/* 控制按钮 */}
       <div className="flex justify-center gap-4 mb-8">
@@ -291,6 +333,15 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                             思考中...
                           </span>
                         )}
+                        {ttsEnabled && !isStreaming(roundNum, "pro") && (
+                          <button
+                            onClick={() => playSingleSpeech(proContent, "pro", roundNum as 1 | 2 | 3)}
+                            className="ml-auto p-1 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
+                            title="播放语音"
+                          >
+                            <Volume2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                       <div className="bg-gradient-to-r from-red-950/50 to-transparent border-l-4 border-red-500 rounded-r-xl p-5">
                         <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">
@@ -321,6 +372,15 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                     </div>
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-2 justify-end">
+                        {ttsEnabled && !isStreaming(roundNum, "con") && (
+                          <button
+                            onClick={() => playSingleSpeech(conContent, "con", roundNum as 1 | 2 | 3)}
+                            className="ml-auto p-1 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
+                            title="播放语音"
+                          >
+                            <Volume2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                         {isStreaming(roundNum, "con") && (
                           <span className="flex items-center gap-1 text-xs text-amber-400 animate-pulse">
                             <Sparkles className="w-3 h-3" />
