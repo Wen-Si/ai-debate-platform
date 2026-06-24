@@ -1,0 +1,3 @@
+[build]
+  command = "npx next build -c next.config.netlify.ts"
+  publish = "dist"

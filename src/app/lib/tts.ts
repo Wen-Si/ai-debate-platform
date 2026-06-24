@@ -11,44 +11,63 @@ export interface VoiceConfig {
   volume: number;  // 音量 0-1
 }
 
+const MAX_TTS_TEXT_LENGTH = 500; // TTS单次最大文本长度
+
 let cachedVoices: SpeechSynthesisVoice[] = [];
 let voicesLoaded = false;
+let voicesLoadPromise: Promise<SpeechSynthesisVoice[]> | null = null;
 
 // 加载系统语音
 export function loadVoices(): Promise<SpeechSynthesisVoice[]> {
-  return new Promise((resolve) => {
+  if (voicesLoaded && cachedVoices.length > 0) {
+    return Promise.resolve(cachedVoices);
+  }
+  if (voicesLoadPromise) {
+    return voicesLoadPromise;
+  }
+
+  voicesLoadPromise = new Promise((resolve) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      voicesLoaded = true;
       resolve([]);
       return;
     }
 
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let resolved = false;
+
+    const doResolve = (voices: SpeechSynthesisVoice[]) => {
+      if (resolved) return;
+      resolved = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      cachedVoices = voices;
+      voicesLoaded = true;
+      resolve(voices);
+    };
+
     const getVoices = () => {
       const voices = window.speechSynthesis.getVoices();
       if (voices.length > 0) {
-        cachedVoices = voices;
-        voicesLoaded = true;
-        resolve(voices);
+        doResolve(voices);
       }
     };
 
     // 有些浏览器需要等待voiceschanged事件
     getVoices();
-    if (cachedVoices.length === 0) {
+    if (!resolved) {
       window.speechSynthesis.addEventListener("voiceschanged", getVoices, {
         once: true,
       });
       // 兜底超时
-      setTimeout(() => {
-        if (!voicesLoaded) {
-          cachedVoices = window.speechSynthesis.getVoices();
-          voicesLoaded = true;
-          resolve(cachedVoices);
+      timeoutId = setTimeout(() => {
+        if (!resolved) {
+          doResolve(window.speechSynthesis.getVoices());
         }
-      }, 1500);
-    } else {
-      resolve(cachedVoices);
+      }, 2000);
     }
   });
+
+  return voicesLoadPromise;
 }
 
 // 获取中文语音（优先选择女声/男声）
@@ -123,6 +142,10 @@ export function getVoiceConfig(side: Side, position: Position): VoiceConfig {
     }
   }
 
+  // 限制参数范围
+  rate = Math.max(0.5, Math.min(2.0, rate));
+  pitch = Math.max(0, Math.min(2, pitch));
+
   const voice = getChineseVoice(preferredGender);
 
   return {
@@ -133,96 +156,97 @@ export function getVoiceConfig(side: Side, position: Position): VoiceConfig {
   };
 }
 
-// 立即播放语音（必须在用户交互事件中同步调用）
-export function speakNow(
-  text: string,
-  config: VoiceConfig,
-  onStart?: () => void,
-  onEnd?: () => void
-): void {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-    return;
-  }
-
-  try {
-    // 取消之前未完成的语音
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    if (config.voice) {
-      utterance.voice = config.voice;
-    }
-    utterance.lang = "zh-CN";
-    utterance.rate = config.rate;
-    utterance.pitch = config.pitch;
-    utterance.volume = config.volume;
-
-    utterance.onstart = () => {
-      onStart?.();
-    };
-
-    utterance.onend = () => {
-      onEnd?.();
-    };
-
-    utterance.onerror = (e) => {
-      console.warn("TTS error:", e);
-      onEnd?.();
-    };
-
-    // 立即调用，保留用户交互上下文
-    window.speechSynthesis.speak(utterance);
-  } catch (e) {
-    console.error("TTS speak error:", e);
-    onEnd?.();
-  }
+/**
+ * 清理TTS文本，移除可能导致问题的内容
+ */
+function sanitizeTtsText(text: string): string {
+  if (!text) return "";
+  // 移除HTML标签、特殊控制字符
+  return text
+    .replace(/<[^>]+>/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_TTS_TEXT_LENGTH);
 }
 
-// Promise版本的speak（保持向后兼容）
-export function speak(
+/**
+ * 立即播放语音（必须在用户交互事件中同步调用）
+ * 返回Promise，当语音播放完毕或出错时resolve
+ */
+export function speakNow(
   text: string,
   config: VoiceConfig,
   onStart?: () => void,
   onEnd?: () => void
 ): Promise<void> {
   return new Promise((resolve) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      onEnd?.();
       resolve();
+    };
+
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      done();
+      return;
+    }
+
+    const safeText = sanitizeTtsText(text);
+    if (!safeText) {
+      done();
       return;
     }
 
     try {
-      const utterance = new SpeechSynthesisUtterance(text);
+      // 取消之前未完成的语音
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(safeText);
       if (config.voice) {
         utterance.voice = config.voice;
       }
       utterance.lang = "zh-CN";
-      utterance.rate = config.rate;
-      utterance.pitch = config.pitch;
-      utterance.volume = config.volume;
+      utterance.rate = Math.max(0.1, Math.min(10, config.rate));
+      utterance.pitch = Math.max(0, Math.min(2, config.pitch));
+      utterance.volume = Math.max(0, Math.min(1, config.volume));
 
       utterance.onstart = () => {
         onStart?.();
       };
 
       utterance.onend = () => {
-        onEnd?.();
-        resolve();
+        done();
       };
 
       utterance.onerror = (e) => {
         console.warn("TTS error:", e);
-        onEnd?.();
-        resolve();
+        done();
       };
 
+      // 兜底超时：根据文本长度估算播放时间，最长30秒
+      const estimatedDuration = Math.min(30000, safeText.length * 200 + 3000);
+      setTimeout(() => done(), estimatedDuration);
+
+      // 立即调用，保留用户交互上下文
       window.speechSynthesis.speak(utterance);
     } catch (e) {
       console.error("TTS speak error:", e);
-      onEnd?.();
-      resolve();
+      done();
     }
   });
+}
+
+// Promise版本的speak（保持向后兼容，已被speakNow替代）
+export function speak(
+  text: string,
+  config: VoiceConfig,
+  onStart?: () => void,
+  onEnd?: () => void
+): Promise<void> {
+  return speakNow(text, config, onStart, onEnd);
 }
 
 // 停止所有语音
@@ -259,17 +283,24 @@ export function resumeSpeaking(): void {
 }
 
 // 解锁音频（必须在用户交互事件中调用一次）
-export function unlockAudio(): void {
+export function unlockAudio(): boolean {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-    return;
+    return false;
   }
   try {
     // 播放一个空utterance来解锁音频
-    const u = new SpeechSynthesisUtterance("");
+    const u = new SpeechSynthesisUtterance(" ");
     u.volume = 0;
     u.lang = "zh-CN";
     window.speechSynthesis.speak(u);
+    return true;
   } catch (e) {
     console.warn("TTS unlock error:", e);
+    return false;
   }
+}
+
+// 检查TTS是否可用
+export function isTtsSupported(): boolean {
+  return typeof window !== "undefined" && "speechSynthesis" in window;
 }

@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2, Volume2 } from "lucide-react";
+import { Swords, User, Sparkles, Play, RotateCcw, Clock, Trash2, Volume2, VolumeX, AlertTriangle } from "lucide-react";
 import { generateDebateStream, DebateRound } from "@/app/lib/glm";
 import {
   saveDebateRecord,
@@ -16,6 +16,7 @@ import {
   speakNow,
   stopSpeaking,
   unlockAudio,
+  isTtsSupported,
 } from "@/app/lib/tts";
 import VoiceControls from "./VoiceControls";
 
@@ -44,8 +45,10 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
   const [activeSpeaker, setActiveSpeaker] = useState<"pro" | "con" | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [voiceRate, setVoiceRate] = useState(1.0);
+  const [ttsMessage, setTtsMessage] = useState("");
   const ttsEnabledRef = useRef(ttsEnabled);
   const voiceRateRef = useRef(voiceRate);
+  const isLoadingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,9 +60,15 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
   }, [voiceRate]);
 
   useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
+
+  useEffect(() => {
     setHistory(getDebateHistory());
     // 预加载语音
-    loadVoices();
+    if (isTtsSupported()) {
+      loadVoices();
+    }
   }, []);
 
   useEffect(() => {
@@ -68,22 +77,39 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     }
   }, [streaming, currentRound]);
 
+  // 清理：组件卸载时停止语音
+  useEffect(() => {
+    return () => {
+      stopSpeaking();
+    };
+  }, []);
+
+  const showTtsMessage = useCallback((msg: string) => {
+    setTtsMessage(msg);
+    setTimeout(() => setTtsMessage(""), 3000);
+  }, []);
+
   // 播放单条发言（用户主动点击）
-  const playSingleSpeech = (text: string, side: "pro" | "con", position: 1 | 2 | 3) => {
+  const playSingleSpeech = useCallback((text: string, side: "pro" | "con", position: 1 | 2 | 3) => {
     if (!ttsEnabledRef.current) {
-      alert('请先点击"语音播报"按钮开启功能');
+      showTtsMessage('请先点击"语音播报"按钮开启功能');
       return;
     }
-    if (!text) return;
+    if (!text || text.length < 5) return;
+    if (!isTtsSupported()) {
+      showTtsMessage("您的浏览器不支持语音播报");
+      return;
+    }
     unlockAudio();
     const config = getVoiceConfig(side, position);
     config.rate = voiceRateRef.current;
     stopSpeaking();
     speakNow(text, config);
-  };
+  }, [showTtsMessage]);
 
   // 播放完整辩论（按时间线）
-  const startDebate = async () => {
+  const startDebate = useCallback(async () => {
+    if (isLoadingRef.current) return; // 防止重复点击
     setIsLoading(true);
     setError("");
     setRounds([]);
@@ -93,12 +119,12 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     stopSpeaking();
 
     // 如果开启了TTS，解锁音频
-    if (ttsEnabledRef.current) {
+    if (ttsEnabledRef.current && isTtsSupported()) {
       unlockAudio();
     }
 
     // 收集所有发言用于串行TTS播放
-    const ttsQueue: Array<{ text: string; side: "pro" | "con"; position: number }> = [];
+    const ttsQueue: Array<{ text: string; side: "pro" | "con"; position: 1 | 2 | 3 }> = [];
 
     try {
       const finalRounds = await generateDebateStream(
@@ -122,16 +148,20 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
           setCurrentRound(round);
         },
         // 轮次完成回调
-        (round) => {
+        () => {
           setActiveSpeaker(null);
         },
         // 正方完成回调 - 加入TTS队列
         (round, content) => {
-          ttsQueue.push({ text: content, side: "pro", position: round });
+          if (content && content.length > 10) {
+            ttsQueue.push({ text: content, side: "pro", position: round as 1 | 2 | 3 });
+          }
         },
         // 反方完成回调 - 加入TTS队列
         (round, content) => {
-          ttsQueue.push({ text: content, side: "con", position: round });
+          if (content && content.length > 10) {
+            ttsQueue.push({ text: content, side: "con", position: round as 1 | 2 | 3 });
+          }
         },
         30
       );
@@ -141,16 +171,12 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
       setActiveSpeaker(null);
 
       // 辩论内容全部生成后，串行播放TTS
-      if (ttsEnabledRef.current && ttsQueue.length > 0) {
+      if (ttsEnabledRef.current && isTtsSupported() && ttsQueue.length > 0) {
         for (const item of ttsQueue) {
           if (!ttsEnabledRef.current) break; // 用户中途关闭
-          await new Promise<void>((resolve) => {
-            const config = getVoiceConfig(item.side, item.position as 1 | 2 | 3);
-            config.rate = voiceRateRef.current;
-            speakNow(item.text, config, undefined, () => resolve());
-            // 兜底超时
-            setTimeout(() => resolve(), Math.max(10000, item.text.length * 200));
-          });
+          const config = getVoiceConfig(item.side, item.position);
+          config.rate = voiceRateRef.current;
+          await speakNow(item.text, config);
         }
       }
 
@@ -167,14 +193,15 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
       setHistory(getDebateHistory());
     } catch (err) {
       console.error("Debate error:", err);
-      setError("辩论生成失败，请稍后重试");
+      const message = err instanceof Error ? err.message : "辩论生成失败，请稍后重试";
+      setError(message);
     } finally {
       setIsLoading(false);
       setActiveSpeaker(null);
     }
-  };
+  }, [topic, topicId, category, date, showTtsMessage]);
 
-  const loadHistory = (record: DebateRecord) => {
+  const loadHistory = useCallback((record: DebateRecord) => {
     setRounds(record.rounds);
     setCurrentRound(record.rounds.length);
     setIsComplete(true);
@@ -182,18 +209,18 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setStreaming({});
     setActiveSpeaker(null);
     stopSpeaking();
-  };
+  }, []);
 
-  const handleDeleteHistory = (id: string, e: React.MouseEvent) => {
+  const handleDeleteHistory = useCallback((id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     deleteDebateRecord(id);
     setHistory(getDebateHistory());
     if (id === topicId) {
       resetDebate();
     }
-  };
+  }, [topicId]);
 
-  const resetDebate = () => {
+  const resetDebate = useCallback(() => {
     setRounds([]);
     setCurrentRound(0);
     setIsComplete(false);
@@ -201,7 +228,14 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
     setStreaming({});
     setActiveSpeaker(null);
     stopSpeaking();
-  };
+  }, []);
+
+  const handleTtsToggle = useCallback((enabled: boolean) => {
+    setTtsEnabled(enabled);
+    if (!enabled) {
+      stopSpeaking();
+    }
+  }, []);
 
   const positionNames = ["一辩", "二辩", "三辩"];
 
@@ -222,9 +256,24 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
 
   return (
     <div className="w-full max-w-5xl mx-auto">
+      {/* TTS提示消息 */}
+      <AnimatePresence>
+        {ttsMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-amber-500/20 border border-amber-500/30 rounded-lg text-amber-400 text-sm flex items-center gap-2"
+          >
+            <AlertTriangle className="w-4 h-4" />
+            {ttsMessage}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* 顶部工具栏 */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
-        {/* 历史记录侧边栏触发区 */}
+        {/* 历史记录 */}
         {history.length > 0 && (
           <div className="flex items-center gap-2 flex-wrap">
             <div className="flex items-center gap-2 text-sm text-slate-400">
@@ -245,6 +294,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                 <span
                   onClick={(e) => handleDeleteHistory(record.id, e)}
                   className="p-0.5 hover:bg-red-500/20 rounded-full transition-colors"
+                  title="删除"
                 >
                   <Trash2 className="w-3 h-3" />
                 </span>
@@ -257,7 +307,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
         <div className="relative ml-auto">
           <VoiceControls
             ttsEnabled={ttsEnabled}
-            onTtsEnabledChange={setTtsEnabled}
+            onTtsEnabledChange={handleTtsToggle}
             voiceRate={voiceRate}
             onVoiceRateChange={setVoiceRate}
           />
@@ -278,7 +328,17 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
           </motion.button>
         )}
 
-        {isComplete && (
+        {isLoading && (
+          <button
+            onClick={resetDebate}
+            className="flex items-center gap-2 px-6 py-3 bg-slate-700 rounded-full text-white font-medium hover:bg-slate-600 transition-colors"
+          >
+            <VolumeX className="w-4 h-4" />
+            停止辩论
+          </button>
+        )}
+
+        {isComplete && !isLoading && (
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -301,14 +361,26 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
             <Swords className="w-16 h-16 text-amber-400" />
           </motion.div>
           <p className="mt-4 text-slate-400 text-lg">AI辩手正在准备中...</p>
+          <p className="mt-2 text-slate-500 text-sm">正在调用智谱GLM-4-Flash大模型</p>
         </div>
       )}
 
       {/* 错误提示 */}
       {error && (
-        <div className="text-center py-8 text-red-400 bg-red-900/20 rounded-xl border border-red-800">
-          {error}
-        </div>
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="text-center py-8 text-red-400 bg-red-900/20 rounded-xl border border-red-800"
+        >
+          <AlertTriangle className="w-8 h-8 mx-auto mb-2 opacity-50" />
+          <p>{error}</p>
+          <button
+            onClick={startDebate}
+            className="mt-4 px-4 py-2 bg-red-500/20 border border-red-500/30 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors text-sm"
+          >
+            重试
+          </button>
+        </motion.div>
       )}
 
       {/* 辩论内容 */}
@@ -347,7 +419,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                   >
                     <div className="flex-shrink-0">
                       <div className={`w-12 h-12 rounded-full bg-gradient-to-br from-red-500 to-red-700 flex items-center justify-center ${
-                        isStreaming(roundNum, "pro") ? "animate-pulse-glow" : ""
+                        isStreaming(roundNum, "pro") ? "ring-2 ring-amber-400 ring-opacity-50" : ""
                       }`}>
                         <User className="w-6 h-6 text-white" />
                       </div>
@@ -361,16 +433,17 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                           支持方
                         </span>
                         {isStreaming(roundNum, "pro") && (
-                          <span className="flex items-center gap-1 text-xs text-amber-400 animate-pulse">
-                            <Sparkles className="w-3 h-3" />
-                            思考中...
+                          <span className="flex items-center gap-1 text-xs text-amber-400">
+                            <Sparkles className="w-3 h-3 animate-spin" />
+                            正在发言...
                           </span>
                         )}
-                        {ttsEnabled && !isStreaming(roundNum, "pro") && (
+                        {ttsEnabled && !isStreaming(roundNum, "pro") && proContent.length > 10 && (
                           <button
                             onClick={() => playSingleSpeech(proContent, "pro", roundNum as 1 | 2 | 3)}
                             className="ml-auto p-1.5 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
                             title="播放语音"
+                            aria-label="播放语音"
                           >
                             <Volume2 className="w-3.5 h-3.5" />
                           </button>
@@ -398,26 +471,27 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
                   >
                     <div className="flex-shrink-0">
                       <div className={`w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center ${
-                        isStreaming(roundNum, "con") ? "animate-pulse-glow-blue" : ""
+                        isStreaming(roundNum, "con") ? "ring-2 ring-amber-400 ring-opacity-50" : ""
                       }`}>
                         <User className="w-6 h-6 text-white" />
                       </div>
                     </div>
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-2 justify-end">
-                        {ttsEnabled && !isStreaming(roundNum, "con") && (
+                        {ttsEnabled && !isStreaming(roundNum, "con") && conContent.length > 10 && (
                           <button
                             onClick={() => playSingleSpeech(conContent, "con", roundNum as 1 | 2 | 3)}
-                            className="ml-auto p-1.5 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
+                            className="mr-auto p-1.5 hover:bg-slate-800 rounded transition-colors text-slate-500 hover:text-amber-400"
                             title="播放语音"
+                            aria-label="播放语音"
                           >
                             <Volume2 className="w-3.5 h-3.5" />
                           </button>
                         )}
                         {isStreaming(roundNum, "con") && (
-                          <span className="flex items-center gap-1 text-xs text-amber-400 animate-pulse">
-                            <Sparkles className="w-3 h-3" />
-                            思考中...
+                          <span className="flex items-center gap-1 text-xs text-amber-400">
+                            <Sparkles className="w-3 h-3 animate-spin" />
+                            正在发言...
                           </span>
                         )}
                         <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 text-xs rounded-full border border-blue-500/30">
@@ -444,7 +518,7 @@ export default function DebateArena({ topic, topicId, category, date }: DebateAr
         </AnimatePresence>
 
         {/* 辩论结束 */}
-        {isComplete && (
+        {isComplete && !isLoading && (
           <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
